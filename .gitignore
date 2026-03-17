@@ -1,0 +1,38 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+/venv
+.env
+# Log files
+*.log
+src/auth/log/
+logs/
+# openspec
+openspec/
+AGENTS.md
+CLAUDE.md
+/.augment
+
+/tests
+/demo
+/docker/data
+/work_task
+
+/code
+/csv
+/csvcopy
+/results
+/cherry-studio/newlog
+/cherry-studio/other
+/txtquery/测试
+/txtquery/copy
+/txtquery/V1
+/data_process/log
+任务日志.md

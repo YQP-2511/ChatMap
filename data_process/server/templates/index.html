@@ -1,0 +1,979 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CSV 数据管理服务</title>
+    <!-- Bootstrap CSS -->
+    <link href="/static/css/bootstrap.min.css" rel="stylesheet">
+    <!-- Vue 3 -->
+    <script src="/static/js/vue.global.prod.min.js"></script>
+    <style>
+        .table-container {
+            overflow-x: auto;
+        }
+        .loading-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(255,255,255,0.8);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            z-index: 1000;
+        }
+        /* Sidebar Styles */
+        .sidebar {
+            height: 100vh;
+            overflow-y: auto;
+            border-right: 1px solid #dee2e6;
+            background-color: #f8f9fa;
+        }
+        .main-content {
+            height: 100vh;
+            overflow-y: auto;
+        }
+        .tree-node {
+            cursor: pointer;
+            padding: 4px 8px;
+            border-radius: 4px;
+        }
+        .tree-node:hover {
+            background-color: #e9ecef;
+        }
+        .tree-node.active {
+            background-color: #0d6efd;
+            color: white;
+        }
+        .folder-icon::before {
+            content: "📁 ";
+        }
+        .file-icon::before {
+            content: "📄 ";
+        }
+        .html-icon::before {
+            content: "🌏 ";
+        }
+        .geojson-icon::before {
+            content: "🗺️ ";
+        }
+        .folder-open::before {
+            content: "📂 ";
+        }
+        .nested {
+            margin-left: 20px;
+        }
+        .sticky-header {
+            position: sticky;
+            top: 0;
+            background-color: white;
+            z-index: 1000;
+            padding-top: 1.5rem; /* Match p-4 top padding */
+            padding-bottom: 1rem;
+            margin-top: -1.5rem; /* Counteract container padding */
+            margin-left: -1.5rem; /* Extend to edges */
+            margin-right: -1.5rem;
+            padding-left: 1.5rem;
+            padding-right: 1.5rem;
+            border-bottom: 1px solid #dee2e6;
+            margin-bottom: 1.5rem;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+        }
+    </style>
+</head>
+<body>
+    <div id="app" class="container-fluid">
+    {% raw %}
+        <div class="row">
+            <!-- Sidebar -->
+            <div class="col-md-3 col-lg-2 sidebar p-3">
+                <h5 class="mb-3">文件浏览</h5>
+                <div v-if="fileTree">
+                    <tree-item 
+                        :model="fileTree" 
+                        @select-file="selectFile"
+                        :selected-path="selectedFile ? selectedFile.path : ''">
+                    </tree-item>
+                </div>
+                <div v-else class="text-muted small">加载中...</div>
+            </div>
+
+            <!-- Main Content -->
+            <div class="col-md-9 col-lg-10 main-content p-4">
+                <div class="d-flex justify-content-between align-items-center sticky-header">
+                    <h2 class="m-0">CSV 数据管理</h2>
+                    <div>
+                        <button class="btn btn-success me-2" @click="saveAll" :disabled="!selectedFile || saving">
+                            <span v-if="saving" class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span>
+                            {{ saveBtnText }}
+                        </button>
+                        <button class="btn btn-warning me-2" @click="batchRun" :disabled="!selectedFile || batching || !hasCodeColumn">
+                            <span v-if="batching" class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span>
+                            批量运行
+                        </button>
+                        <button class="btn btn-primary" @click="loadFileContent" :disabled="!selectedFile">刷新数据</button>
+                        <button class="btn btn-info ms-2" @click="openVerifyModal" :disabled="!selectedFile || !selectedFile.name.toLowerCase().endsWith('.csv')">批量检测</button>
+                    </div>
+                </div>
+
+                <div v-if="selectedFile" class="mb-3">
+                    <strong>当前文件：</strong> {{ selectedFile.name }}
+                    <br>
+                    <small class="text-muted">{{ selectedFile.path }}</small>
+                </div>
+
+                <div v-if="loading" class="loading-overlay">
+                    <div class="spinner-border text-primary" role="status">
+                        <span class="visually-hidden">Loading...</span>
+                    </div>
+                </div>
+
+                <div v-if="currentData.length > 0" class="table-container">
+                    <table class="table table-bordered table-striped table-hover align-middle">
+                        <thead class="table-dark">
+                            <tr>
+                                <th v-if="!columns.includes('序号')" style="width: 50px;">#</th>
+                                <th v-for="col in columns" :key="col" :style="getColStyle(col)">
+                                    {{ col }}
+                                </th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr v-for="(row, index) in currentData" :key="index">
+                                <td v-if="!columns.includes('序号')">{{ index + 1 }}</td>
+                                <td v-for="col in columns" :key="col">
+                                    <!-- Special handling for '是否成功' -->
+                                    <div v-if="col === '是否成功'">
+                                        <select class="form-select form-select-sm" v-model="row[col]" :class="{'bg-success text-white': row[col] === '是', 'bg-danger text-white': row[col] === '否'}">
+                                            <option value="">未标记</option>
+                                            <option value="是">是</option>
+                                            <option value="否">否</option>
+                                        </select>
+                                    </div>
+                                    <!-- Special handling for '备注' -->
+                                    <div v-else-if="col === '备注'">
+                                        <input type="text" class="form-control form-control-sm" v-model="row[col]">
+                                    </div>
+                                    <!-- Special handling for 'query' (case-insensitive) to show as link -->
+                                    <div v-else-if="isQueryColumn(col) && getUrlForRow(row)">
+                                        <a :href="getUrlForRow(row)" target="_blank">{{ row[col] }}</a>
+                                    </div>
+                                    <!-- Special handling for 'layer' to limit width and add copy -->
+                                    <div v-else-if="isLayerColumn(col)" class="d-flex align-items-center justify-content-between" style="width: 100%; min-width: 180px;">
+                                        <div :title="row[col]" class="text-truncate me-2" style="max-width: 150px;">
+                                            {{ row[col] }}
+                                        </div>
+                                        <button v-if="row[col]" class="btn btn-sm btn-primary" @click="copyToClipboard(row[col])" title="复制图层名" style="min-width: 65px;">
+                                            <i class="bi bi-clipboard"></i> 复制
+                                        </button>
+                                    </div>
+                                    <!-- Special handling for Code Execution -->
+                                    <div v-else-if="isCodeColumn(col)">
+                                        <div v-if="row[col]" style="max-width: 200px;">
+                                            <a href="#" @click.prevent="runCode(row, index)" class="text-decoration-none d-flex align-items-center" :title="row[col]">
+                                                <span class="text-truncate me-2 flex-grow-1">{{ row[col] }}</span>
+                                                <span class="badge bg-primary rounded-pill flex-shrink-0">运行</span>
+                                            </a>
+                                        </div>
+                                    </div>
+                                    <!-- Special handling for 'URL' -->
+                                    <div v-else-if="col === 'URL'">
+                                         <a v-if="row[col]" :href="getUrlForRow(row)" target="_blank" class="btn btn-sm btn-outline-primary">查看链接</a>
+                                    </div>
+                                    <!-- Special handling for HTML Result -->
+                                    <div v-else-if="col === 'HTML Result'">
+                                        <div v-if="row[col]">
+                                            <template v-for="link in row[col].split('|')" :key="link">
+                                                <a v-if="link.toLowerCase().endsWith('.geojson')" 
+                                                   :href="'/workspace/geojson_viewer.html?file=' + link" 
+                                                   target="_blank" 
+                                                   class="btn btn-sm btn-outline-primary me-1 mb-1">
+                                                    <i class="bi bi-map"></i> 查看地图
+                                                </a>
+                                                <a v-else 
+                                                   :href="'/workspace/' + link" 
+                                                   target="_blank" 
+                                                   class="btn btn-sm btn-outline-primary me-1 mb-1">
+                                                    查看结果
+                                                </a>
+                                            </template>
+                                        </div>
+                                    </div>
+                                    <!-- Special handling for Log -->
+                                    <div v-else-if="col === 'Log'">
+                                        <div v-if="row[col]" style="max-height: 150px; overflow-y: auto; white-space: pre-wrap; font-size: 0.85em; min-width: 200px;" class="border rounded p-1 bg-light">
+                                            {{ row[col] }}
+                                        </div>
+                                        <span v-else class="text-muted small">(无日志)</span>
+                                    </div>
+                                    <!-- Read-only for other columns -->
+                                    <div v-else>
+                                        {{ row[col] }}
+                                    </div>
+                                </td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+                
+                <div v-else-if="selectedFile && !loading" class="alert alert-info">
+                    该文件为空或无法读取。
+                </div>
+                <div v-else-if="!selectedFile" class="alert alert-secondary">
+                    请在左侧选择一个 CSV 文件开始操作。
+                </div>
+
+                <!-- Result Modal -->
+                <div class="modal fade" id="resultModal" tabindex="-1" aria-hidden="true">
+                    <div class="modal-dialog modal-lg">
+                        <div class="modal-content">
+                            <div class="modal-header">
+                                <h5 class="modal-title">执行结果</h5>
+                                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                            </div>
+                            <div class="modal-body">
+                                <div v-if="executionResult">
+                                    <div v-if="executionResult.error" class="alert alert-danger">
+                                        {{ executionResult.error }}
+                                    </div>
+                                    <div v-else>
+                                        <div class="mb-3">
+                                            <strong>Return Code:</strong> 
+                                            <span :class="{'text-success': executionResult.returncode === 0, 'text-danger': executionResult.returncode !== 0}">
+                                                {{ executionResult.returncode }}
+                                            </span>
+                                        </div>
+                                        <div class="mb-3">
+                                            <strong>Stdout:</strong>
+                                            <pre class="bg-light p-2 border rounded" style="max-height: 300px; overflow-y: auto;">{{ executionResult.stdout || '(no output)' }}</pre>
+                                        </div>
+                                        <div class="mb-3">
+                                            <strong>Stderr:</strong>
+                                            <pre class="bg-light p-2 border rounded" style="max-height: 300px; overflow-y: auto;">{{ executionResult.stderr || '(no error output)' }}</pre>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div v-else class="text-center">
+                                    <div class="spinner-border text-primary" role="status">
+                                        <span class="visually-hidden">Executing...</span>
+                                    </div>
+                                    <p class="mt-2">正在执行代码，请稍候...</p>
+                                </div>
+                            </div>
+                            <div class="modal-footer">
+                                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">关闭</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Batch Result Modal -->
+                <div class="modal fade" id="batchResultModal" tabindex="-1" aria-hidden="true">
+                    <div class="modal-dialog modal-xl">
+                        <div class="modal-content">
+                            <div class="modal-header">
+                                <h5 class="modal-title">批量执行结果</h5>
+                                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                            </div>
+                            <div class="modal-body">
+                                <div v-if="batchExecutionResults">
+                                    <div class="table-responsive">
+                                        <table class="table table-sm table-bordered">
+                                            <thead>
+                                                <tr>
+                                                    <th>Script</th>
+                                                    <th>Status</th>
+                                                    <th>Stdout</th>
+                                                    <th>Stderr</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody>
+                                                <tr v-for="(res, idx) in batchExecutionResults" :key="idx">
+                                                    <td class="text-break" style="max-width: 200px;">{{ res.script }}</td>
+                                                    <td>
+                                                        <span v-if="res.error" class="badge bg-danger">Error</span>
+                                                        <span v-else-if="res.returncode === 0" class="badge bg-success">Success</span>
+                                                        <span v-else class="badge bg-warning text-dark">Fail ({{ res.returncode }})</span>
+                                                    </td>
+                                                    <td><pre style="max-height: 100px; overflow-y: auto; font-size: 0.8em;">{{ res.stdout }}</pre></td>
+                                                    <td><pre style="max-height: 100px; overflow-y: auto; font-size: 0.8em;" class="text-danger">{{ res.stderr || res.error }}</pre></td>
+                                                </tr>
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                </div>
+                                <div v-else class="text-center">
+                                    <div class="spinner-border text-warning" role="status">
+                                        <span class="visually-hidden">Executing...</span>
+                                    </div>
+                                    <p class="mt-2">正在批量执行，请稍候...</p>
+                                </div>
+                            </div>
+                            <div class="modal-footer">
+                                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">关闭</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Batch Verify Modal -->
+                <div class="modal fade" id="batchVerifyModal" tabindex="-1" aria-hidden="true">
+                    <div class="modal-dialog">
+                        <div class="modal-content">
+                            <div class="modal-header">
+                                <h5 class="modal-title">批量检测是否成功</h5>
+                                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                            </div>
+                            <div class="modal-body">
+                                <div class="mb-3">
+                                    <label class="form-label">选择问题集 (TXT文件):</label>
+                                    <select class="form-select" v-model="selectedTxtFile">
+                                        <option value="" disabled>请选择...</option>
+                                        <option v-for="file in txtFilesList" :key="file.path" :value="file.path">
+                                            {{ file.name }}
+                                        </option>
+                                    </select>
+                                    <div v-if="txtFilesList.length === 0" class="form-text text-danger">
+                                        未找到 TXT 文件，请检查 txtquery 目录。
+                                    </div>
+                                </div>
+                                
+                                <div v-if="verifyResult" class="alert" :class="verifyResult.error ? 'alert-danger' : 'alert-success'">
+                                    <div v-if="verifyResult.error">Error: {{ verifyResult.error }}</div>
+                                    <div v-else>
+                                        <strong>检测完成!</strong><br>
+                                        匹配问题数: {{ verifyResult.matched_questions }}<br>
+                                        更新行数: {{ verifyResult.updated_rows }}<br>
+                                        TXT问题总数: {{ verifyResult.total_questions_in_txt }}
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="modal-footer">
+                                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">关闭</button>
+                                <button type="button" class="btn btn-primary" @click="executeVerify" :disabled="!selectedTxtFile || verifying">
+                                    <span v-if="verifying" class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span>
+                                    开始检测
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Log Modal -->
+                <div class="modal fade" id="logModal" tabindex="-1" aria-hidden="true">
+                    <div class="modal-dialog modal-lg">
+                        <div class="modal-content">
+                            <div class="modal-header">
+                                <h5 class="modal-title">执行日志</h5>
+                                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                            </div>
+                            <div class="modal-body">
+                                <pre class="bg-light p-3 border rounded" style="max-height: 500px; overflow-y: auto; white-space: pre-wrap;">{{ logContent }}</pre>
+                            </div>
+                            <div class="modal-footer">
+                                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">关闭</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Toast Notification -->
+                <div class="position-fixed bottom-0 end-0 p-3" style="z-index: 11">
+                    <div id="liveToast" class="toast" role="alert" aria-live="assertive" aria-atomic="true" ref="toast">
+                        <div class="toast-header">
+                            <strong class="me-auto">提示</strong>
+                            <button type="button" class="btn-close" data-bs-dismiss="toast" aria-label="Close"></button>
+                        </div>
+                        <div class="toast-body">
+                            {{ toastMessage }}
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script type="text/x-template" id="tree-item-template">
+        <div class="tree-item">
+            <div 
+                class="tree-node" 
+                :class="{ 
+                    'folder-icon': isFolder && !isOpen, 
+                    'folder-open': isFolder && isOpen,
+                    'file-icon': !isFolder && model.type !== 'html' && model.type !== 'geojson',
+                    'html-icon': model.type === 'html',
+                    'geojson-icon': model.type === 'geojson',
+                    'active': isSelected
+                }"
+                @click="toggle">
+                {{ model.name }}
+            </div>
+            <div v-show="isOpen" v-if="isFolder" class="nested">
+                <tree-item
+                    class="item"
+                    v-for="(model, index) in model.children"
+                    :key="index"
+                    :model="model"
+                    @select-file="$emit('select-file', $event)"
+                    :selected-path="selectedPath">
+                </tree-item>
+            </div>
+        </div>
+    </script>
+
+    <script src="/static/js/bootstrap.bundle.min.js"></script>
+    <script>
+        const { createApp } = Vue;
+
+        // Tree Item Component
+        const TreeItem = {
+            name: 'TreeItem',
+            template: '#tree-item-template',
+            props: {
+                model: Object,
+                selectedPath: String
+            },
+            data() {
+                return {
+                    isOpen: false
+                }
+            },
+            computed: {
+                isFolder() {
+                    return this.model.type === 'folder';
+                },
+                isSelected() {
+                    return !this.isFolder && this.model.path === this.selectedPath;
+                }
+            },
+            methods: {
+                toggle() {
+                    if (this.isFolder) {
+                        this.isOpen = !this.isOpen;
+                    } else {
+                        this.$emit('select-file', this.model);
+                    }
+                }
+            }
+        };
+
+        createApp({
+            components: {
+                TreeItem
+            },
+            data() {
+                return {
+                    fileTree: null,
+                    selectedFile: null,
+                    columns: [],
+                    allColumns: [], // Stores all columns
+                    currentData: [],
+                    loading: false,
+                    saving: false,
+                    saveBtnText: "全部保存",
+                    toastMessage: "",
+                    toastInstance: null,
+                    resultModal: null,
+                    executionResult: null,
+                    batching: false,
+                    batchExecutionResults: null,
+                    batchResultModal: null,
+                    logModal: null,
+                    logContent: "",
+                    // Batch Verify Data
+                    txtFilesList: [],
+                    selectedTxtFile: "",
+                    verifyResult: null,
+                    verifying: false,
+                    verifyModal: null
+                }
+            },
+            computed: {
+                hasCodeColumn() {
+                    return this.allColumns.some(col => this.isCodeColumn(col));
+                }
+            },
+            mounted() {
+                this.fetchFileList();
+                
+                if (this.$refs.toast) {
+                    this.toastInstance = new bootstrap.Toast(this.$refs.toast);
+                }
+                
+                const resultEl = document.getElementById('resultModal');
+                if (resultEl) {
+                    this.resultModal = new bootstrap.Modal(resultEl);
+                }
+                
+                const batchEl = document.getElementById('batchResultModal');
+                if (batchEl) {
+                    this.batchResultModal = new bootstrap.Modal(batchEl);
+                }
+
+                const logEl = document.getElementById('logModal');
+                if (logEl) {
+                    this.logModal = new bootstrap.Modal(logEl);
+                }
+
+                const verifyEl = document.getElementById('batchVerifyModal');
+                if (verifyEl) {
+                    this.verifyModal = new bootstrap.Modal(verifyEl);
+                }
+            },
+            methods: {
+                openVerifyModal() {
+                    this.verifyResult = null;
+                    this.selectedTxtFile = "";
+                    
+                    // Extract txt files from fileTree
+                    this.txtFilesList = [];
+                    
+                    const findTxtQuery = (node) => {
+                        if (!node) return null;
+                        if (node.name === 'txtquery' && node.type === 'folder') {
+                            return node;
+                        }
+                        if (node.children) {
+                            for (const child of node.children) {
+                                const found = findTxtQuery(child);
+                                if (found) return found;
+                            }
+                        }
+                        return null;
+                    };
+
+                    if (this.fileTree) {
+                        const txtQueryNode = findTxtQuery(this.fileTree);
+                        if (txtQueryNode && txtQueryNode.children) {
+                            this.txtFilesList = txtQueryNode.children.filter(f => f.type !== 'folder' && f.name.toLowerCase().endsWith('.txt'));
+                        }
+                    }
+
+                    if (!this.verifyModal) {
+                        const verifyEl = document.getElementById('batchVerifyModal');
+                        if (verifyEl) {
+                            this.verifyModal = new bootstrap.Modal(verifyEl);
+                        }
+                    }
+                    
+                    if (this.verifyModal) {
+                        this.verifyModal.show();
+                    } else {
+                        this.showToast("无法初始化批量检测模态框");
+                    }
+                },
+                async executeVerify() {
+                    if (!this.selectedFile || !this.selectedTxtFile) return;
+                    
+                    this.verifying = true;
+                    this.verifyResult = null;
+                    
+                    try {
+                        const response = await fetch('/api/batch_verify', {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/json',
+                            },
+                            body: JSON.stringify({
+                                csv_path: this.selectedFile.path,
+                                txt_path: this.selectedTxtFile
+                            })
+                        });
+                        
+                        const result = await response.json();
+                        this.verifyResult = result;
+                        
+                        if (result.updated_rows > 0) {
+                            // Reload CSV data
+                            this.loadFileContent();
+                            this.showToast(`检测完成，更新了 ${result.updated_rows} 行数据`);
+                        }
+                    } catch (error) {
+                        this.verifyResult = { error: error.message };
+                    } finally {
+                        this.verifying = false;
+                    }
+                },
+                async fetchFileList() {
+                    try {
+                        const res = await fetch('/api/files');
+                        this.fileTree = await res.json();
+                    } catch (e) {
+                        console.error("Failed to load file list", e);
+                        this.showToast("加载文件列表失败");
+                    }
+                },
+                selectFile(file) {
+                    if (file.type === 'html' || file.type === 'geojson') {
+                        // Construct URL for nested files
+                        // Path is absolute: f:\geroserverFabu\code\1\foo.html
+                        // We need: /workspace/code/1/foo.html
+                        let path = file.path.replace(/\\/g, '/');
+                        const rootMarker = 'geroserverFabu';
+                        const idx = path.indexOf(rootMarker);
+                        
+                        if (idx !== -1) {
+                            let relPath = path.substring(idx + rootMarker.length);
+                            if (!relPath.startsWith('/')) relPath = '/' + relPath;
+                            const url = `/workspace${relPath}`;
+                            window.open(url, '_blank');
+                        } else {
+                            // Fallback for files not in expected root or if logic fails
+                            const url = `/workspace/${encodeURIComponent(file.name)}`;
+                            window.open(url, '_blank');
+                        }
+                        return;
+                    }
+                    this.selectedFile = file;
+                    this.loadFileContent();
+                },
+                async loadFileContent() {
+                    if (!this.selectedFile) return;
+                    
+                    this.loading = true;
+                    this.currentData = []; // Clear current data
+                    try {
+                        const res = await fetch(`/api/file_content?path=${encodeURIComponent(this.selectedFile.path)}`);
+                        if (!res.ok) throw new Error("Failed to load content");
+                        
+                        const data = await res.json();
+                        
+                        // Show all columns, but order them nicely
+                        const allCols = data.columns;
+                        this.allColumns = allCols;
+                        const orderedCols = [];
+                        
+                        // Priority columns
+                        const priorityCols = ['序号', '问题', 'query', '图层', 'layer', '耗时(s)', 'total tokens'];
+                        
+                        priorityCols.forEach(p => {
+                            const found = allCols.find(c => c.toLowerCase() === p || c === p);
+                            if (found && !orderedCols.includes(found)) {
+                                orderedCols.push(found);
+                            }
+                        });
+                        
+                        // Add remaining columns
+                        allCols.forEach(c => {
+                            const lowerC = c.toLowerCase();
+                            if (!orderedCols.includes(c) && c !== '是否成功' && c !== '备注' && c !== 'HTML Result' && c !== 'Log' && lowerC !== 'url' && c !== '工具链' && lowerC !== 'output file') {
+                                orderedCols.push(c);
+                            }
+                        });
+                        
+                        // Add fixed columns at the end
+                        if (allCols.includes('HTML Result')) orderedCols.push('HTML Result');
+                        if (allCols.includes('Log')) orderedCols.push('Log');
+                        if (allCols.includes('是否成功')) orderedCols.push('是否成功');
+                        if (allCols.includes('备注')) orderedCols.push('备注');
+                        
+                        this.columns = orderedCols;
+                        this.currentData = data.data;
+                    } catch (e) {
+                        console.error(e);
+                        this.showToast("加载文件内容失败: " + e.message);
+                    } finally {
+                        this.loading = false;
+                    }
+                },
+                isQueryColumn(col) {
+                    return col.toLowerCase() === 'query' || col === '问题' || col.toLowerCase() === 'question';
+                },
+                isLayerColumn(col) {
+                    return col.toLowerCase() === 'layer' || col === '图层';
+                },
+                isCodeColumn(col) {
+                    return col.toLowerCase() === 'output file';
+                },
+                getColStyle(col) {
+                    if (this.isLayerColumn(col)) {
+                        return { width: '220px' };
+                    }
+                    if (this.isCodeColumn(col)) {
+                        return { width: '200px' };
+                    }
+                    return {};
+                },
+                resolveScriptPath(filename) {
+                    if (!filename || !this.selectedFile) return null;
+                    
+                    let path = this.selectedFile.path;
+                    let sep = path.lastIndexOf('\\');
+                    if (sep === -1) sep = path.lastIndexOf('/');
+                    
+                    if (sep === -1) return null;
+
+                    let dir = path.substring(0, sep);
+                    let newSep = path.includes('/') ? '/' : '\\';
+                    return dir + newSep + filename;
+                },
+                async runCode(row, index) {
+                    const codeCol = this.allColumns.find(col => this.isCodeColumn(col));
+                    const filename = row[codeCol];
+                    
+                    let scriptPath = this.resolveScriptPath(filename);
+                    if (!scriptPath) {
+                         this.showToast("无法解析文件路径");
+                         return;
+                    }
+                    
+                    // Find Question column (case-insensitive)
+                    const questionCol = Object.keys(row).find(k => k.toLowerCase() === 'question');
+                    const question = questionCol ? row[questionCol] : null;
+
+                    this.executionResult = null;
+                    this.resultModal.show();
+                    
+                    try {
+                        const res = await fetch('/api/run_code', {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/json'
+                            },
+                            body: JSON.stringify({ 
+                                script_path: scriptPath,
+                                question: question,
+                                csv_path: this.selectedFile.path,
+                                row_index: index
+                            })
+                        });
+                        this.executionResult = await res.json();
+                        
+                        // If execution successful and link generated, refresh data
+                        if (this.executionResult.html_link) {
+                            this.showToast("执行成功，结果已生成");
+                            // Ideally reload just this cell, but full reload is safer/easier
+                            setTimeout(() => this.loadFileContent(), 1000);
+                        }
+                    } catch (e) {
+                        this.executionResult = { error: e.message };
+                    }
+                },
+                async batchRun() {
+                    if (!this.currentData || this.currentData.length === 0) {
+                        this.showToast("没有数据可运行");
+                        return;
+                    }
+
+                    const codeCol = this.allColumns.find(col => this.isCodeColumn(col));
+                    if (!codeCol) {
+                        this.showToast("未找到代码列 (Output File)");
+                        return;
+                    }
+
+                    const items = [];
+                    const seen = new Set();
+                    
+                    this.currentData.forEach((row, index) => {
+                        const filename = row[codeCol];
+                        if (filename) {
+                            const path = this.resolveScriptPath(filename);
+                            if (path && !seen.has(path)) {
+                                const questionCol = Object.keys(row).find(k => k.toLowerCase() === 'question');
+                                const question = questionCol ? row[questionCol] : null;
+                                
+                                items.push({
+                                    script_path: path,
+                                    question: question,
+                                    row_index: index
+                                });
+                                seen.add(path);
+                            }
+                        }
+                    });
+
+                    if (items.length === 0) {
+                        this.showToast("没有找到有效的代码文件");
+                        return;
+                    }
+
+                    this.batching = true;
+                    this.batchExecutionResults = null;
+                    this.batchResultModal.show();
+
+                    try {
+                        const res = await fetch('/api/batch_run', {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/json'
+                            },
+                            body: JSON.stringify({ 
+                                items: items,
+                                csv_path: this.selectedFile.path
+                            })
+                        });
+                        const data = await res.json();
+                        this.batchExecutionResults = data.results;
+                        
+                        // Refresh data if any result generated links
+                        if (data.results.some(r => r.html_link)) {
+                            setTimeout(() => this.loadFileContent(), 1000);
+                        }
+                    } catch (e) {
+                        this.batchExecutionResults = [{ error: "Batch execution failed: " + e.message, script: "BATCH_ERROR" }];
+                    } finally {
+                        this.batching = false;
+                    }
+                },
+                getUrlForRow(row) {
+                    // 1. Try HTML Result
+                    if (row['HTML Result']) {
+                        const links = row['HTML Result'].split('|');
+                        // Return first HTML link
+                        const htmlLink = links.find(l => l.toLowerCase().endsWith('.html'));
+                        if (htmlLink) {
+                            return '/workspace/' + htmlLink;
+                        }
+                    }
+
+                    // 2. Try Output File if it is HTML and we know the path
+                    const codeCol = Object.keys(row).find(k => k.toLowerCase() === 'output file');
+                    if (codeCol && row[codeCol] && row[codeCol].toLowerCase().endsWith('.html')) {
+                         const scriptPath = this.resolveScriptPath(row[codeCol]);
+                         if (scriptPath) {
+                             // Convert absolute path to workspace URL
+                             // scriptPath: f:\geroserverFabu\code\1\foo.html
+                             // We want: /workspace/code/1/foo.html
+                             // We can try to replace 'geroserverFabu' or just find the relative part
+                             let path = scriptPath.replace(/\\/g, '/');
+                             const rootMarker = 'geroserverFabu';
+                             const idx = path.indexOf(rootMarker);
+                             
+                             if (idx !== -1) {
+                                 let relPath = path.substring(idx + rootMarker.length);
+                                 if (!relPath.startsWith('/')) relPath = '/' + relPath;
+                                 return `/workspace${relPath}`;
+                             }
+                         }
+                    }
+                    
+                    // 3. Try to find a URL column (case-insensitive)
+                    const urlKey = Object.keys(row).find(k => k.toLowerCase() === 'url');
+                    if (urlKey && row[urlKey]) {
+                        return row[urlKey].replace('159.75.0.138', '192.168.31.102');
+                    }
+                    return null;
+                },
+                async copyToClipboard(text) {
+                    try {
+                        await navigator.clipboard.writeText(text);
+                        this.showToast("已复制到剪贴板: " + text);
+                    } catch (err) {
+                        this.showToast("复制失败: " + err);
+                    }
+                },
+                async saveAll() {
+                    this.saving = true;
+                    this.saveBtnText = "保存中...";
+                    try {
+                        const updates = this.currentData.map((row, index) => ({
+                            index: index,
+                            success: row['是否成功'] || "",
+                            remark: row['备注'] || ""
+                        }));
+
+                        const res = await fetch('/api/save_all', {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/json'
+                            },
+                            body: JSON.stringify({
+                                path: this.selectedFile.path,
+                                updates: updates
+                            })
+                        });
+                        
+                        if (!res.ok) throw new Error("Save all failed");
+                        
+                        const result = await res.json();
+                        const msg = `保存成功！更新了 ${result.updated_count} 行`;
+                        this.showToast(msg);
+                        
+                        // Change button text temporarily
+                        this.saveBtnText = "保存成功!";
+                        setTimeout(() => {
+                            this.saveBtnText = "全部保存";
+                        }, 2000);
+                        
+                    } catch (e) {
+                        console.error(e);
+                        this.showToast("保存失败: " + e.message);
+                        this.saveBtnText = "全部保存";
+                    } finally {
+                        this.saving = false;
+                    }
+                },
+                async saveRow(index, row) {
+                    try {
+                        const res = await fetch(`/api/update_row?path=${encodeURIComponent(this.selectedFile.path)}`, {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/json'
+                            },
+                            body: JSON.stringify({
+                                index: index,
+                                success: row['是否成功'],
+                                remark: row['备注']
+                            })
+                        });
+                        
+                        if (!res.ok) throw new Error("Update failed");
+                        
+                        this.showToast("保存成功！");
+                    } catch (e) {
+                        console.error(e);
+                        this.showToast("保存失败: " + e.message);
+                    }
+                },
+                showToast(msg) {
+                    this.toastMessage = msg;
+                    if (this.toastInstance) {
+                        this.toastInstance.show();
+                    } else {
+                        // Fallback if bootstrap toast failed to init
+                        alert(msg);
+                    }
+                },
+                hasLog(row) {
+                    const codeCol = this.columns.find(col => this.isCodeColumn(col));
+                    const filename = row[codeCol];
+                    const questionCol = Object.keys(row).find(k => k.toLowerCase() === 'question');
+                    return filename && row[questionCol];
+                },
+                async viewLog(row) {
+                    const codeCol = this.columns.find(col => this.isCodeColumn(col));
+                    const filename = row[codeCol];
+                    const scriptPath = this.resolveScriptPath(filename);
+                    
+                    const questionCol = Object.keys(row).find(k => k.toLowerCase() === 'question');
+                    const question = row[questionCol];
+
+                    if (!scriptPath || !question) {
+                        this.showToast("无法获取脚本路径或问题");
+                        return;
+                    }
+
+                    this.logContent = "Loading...";
+                    if (this.logModal) {
+                        this.logModal.show();
+                    } else {
+                        this.showToast("Log modal not initialized");
+                        return;
+                    }
+
+                    try {
+                        const res = await fetch(`/api/get_log?script_path=${encodeURIComponent(scriptPath)}&question=${encodeURIComponent(question)}`);
+                        const data = await res.json();
+                        this.logContent = data.content;
+                    } catch (e) {
+                        this.logContent = "Error loading log: " + e.message;
+                    }
+                }
+            }
+        }).mount('#app');
+    </script>
+    {% endraw %}
+</body>
+</html>

@@ -1,0 +1,16 @@
+fastapi
+uvicorn
+pandas
+jinja2
+python-multipart
+folium
+OWSLib
+geopandas
+requests
+matplotlib
+numpy
+shapely
+pyproj
+geopy
+branca
+ipython
