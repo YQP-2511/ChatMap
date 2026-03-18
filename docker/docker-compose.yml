@@ -1,0 +1,21 @@
+name: wentu_server
+
+services:
+  wentu-server:
+    image: yuqipeng2511/wentu:v0.17
+    container_name: wentu_v0.17
+    build:
+      context: ..
+      dockerfile: Dockerfileslim
+    restart: always
+    ports:
+      - "${HTTP_PORT:-8787}:${HTTP_PORT:-8787}"
+      - "${MCP_PORT:-8000}:${MCP_PORT:-8000}"
+    env_file:
+      - .env
+    volumes:
+      - ./.env:/app/.env
+      - ../data:/app/data
+      - ../logs:/app/logs
+    environment:
+      - PYTHONUNBUFFERED=1
